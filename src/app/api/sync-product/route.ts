@@ -201,7 +201,8 @@ export async function POST(request: NextRequest) {
         if (existingAttrIdx >= 0) {
           const existingAttr = updatedAttributes[existingAttrIdx];
           const existingVal = existingAttr.options?.[0] || "";
-          if (existingVal !== xmlVal || existingAttr.visible !== attrMap.visible) {
+          const existingId = existingAttr.id ?? 0;
+          if (existingVal !== xmlVal || existingAttr.visible !== attrMap.visible || existingId !== globalId) {
             updatedAttributes[existingAttrIdx] = {
               ...existingAttr,
               id: globalId,
@@ -210,7 +211,7 @@ export async function POST(request: NextRequest) {
               options: [xmlVal]
             };
             attributesChanged = true;
-            changes.push(`Özellik (${attrMap.wooName}): "${existingVal}" -> "${xmlVal}"`);
+            changes.push(`Özellik (${attrMap.wooName}): "${existingVal}" -> "${xmlVal}" (ID: ${existingId} -> ${globalId})`);
           }
         } else {
           // Attribute doesn't exist on product, add it
