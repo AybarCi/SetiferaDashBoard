@@ -8,7 +8,7 @@ const CACHE_TTL = 60000; // 1 minute cache TTL
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}));
-    const { wooConfig, product, mapping, priceMultiplier, priceAddition, attributeMappings } = body;
+    const { wooConfig, product, mapping, priceMultiplier, priceAddition, attributeMappings, existingProduct: passedExistingProduct, syncOnlyStockPrice } = body;
     const attrsMap: any[] = Array.isArray(attributeMappings) ? attributeMappings : [];
 
     if (!wooConfig || !wooConfig.url || !wooConfig.consumerKey || !wooConfig.consumerSecret) {
@@ -97,32 +97,39 @@ export async function POST(request: NextRequest) {
       .filter((val: any) => typeof val === "string" && val.trim() !== "")
       .map((url: string) => ({ src: url.trim() }));
 
-    // 1. Search if the product already exists in WooCommerce by SKU (include all statuses, and bypass cache)
-    const searchUrl = `${baseUrl}/wp-json/wc/v3/products?sku=${encodeURIComponent(sku)}&status=any&_=${Date.now()}`;
-    
-    const searchResponse = await fetch(searchUrl, {
-      method: "GET",
-      headers: {
-        "Authorization": authHeader,
-        "Accept": "application/json",
-      },
-      cache: "no-store",
-      next: { revalidate: 0 }
-    });
+    // 1. Search if the product already exists in WooCommerce by SKU (skip if passedExistingProduct is provided)
+    let existingProduct = passedExistingProduct || null;
+    let exists = !!existingProduct;
 
-    if (!searchResponse.ok) {
-      const errText = await searchResponse.text();
-      return NextResponse.json(
-        { success: false, error: `WooCommerce ürün arama hatası (HTTP ${searchResponse.status}): ${errText}` },
-        { status: 400 }
-      );
+    if (!exists) {
+      const searchUrl = `${baseUrl}/wp-json/wc/v3/products?sku=${encodeURIComponent(sku)}&status=any&_=${Date.now()}`;
+      
+      const searchResponse = await fetch(searchUrl, {
+        method: "GET",
+        headers: {
+          "Authorization": authHeader,
+          "Accept": "application/json",
+        },
+        cache: "no-store",
+        next: { revalidate: 0 }
+      });
+
+      if (!searchResponse.ok) {
+        const errText = await searchResponse.text();
+        return NextResponse.json(
+          { success: false, error: `WooCommerce ürün arama hatası (HTTP ${searchResponse.status}): ${errText}` },
+          { status: 400 }
+        );
+      }
+
+      const matchedProducts = await searchResponse.json();
+      if (Array.isArray(matchedProducts) && matchedProducts.length > 0) {
+        existingProduct = matchedProducts[0];
+        exists = true;
+      }
     }
 
-    const matchedProducts = await searchResponse.json();
-    const exists = Array.isArray(matchedProducts) && matchedProducts.length > 0;
-
-    if (exists) {
-      const existingProduct = matchedProducts[0];
+    if (exists && existingProduct) {
       const existingId = existingProduct.id;
 
       // Compare fields to see if updates are needed
@@ -130,7 +137,7 @@ export async function POST(request: NextRequest) {
       const changes: string[] = [];
 
       // Compare Name
-      if (existingProduct.name !== name && name !== "") {
+      if (!syncOnlyStockPrice && existingProduct.name !== name && name !== "") {
         updateData.name = name;
         changes.push(`İsim: "${existingProduct.name}" -> "${name}"`);
       }
@@ -154,81 +161,87 @@ export async function POST(request: NextRequest) {
       }
 
       // Compare Description
-      const existingDesc = (existingProduct.description || "").trim();
-      if (existingDesc !== description && description !== "") {
-        updateData.description = description;
-        changes.push("Açıklama güncellendi");
+      if (!syncOnlyStockPrice) {
+        const existingDesc = (existingProduct.description || "").trim();
+        if (existingDesc !== description && description !== "") {
+          updateData.description = description;
+          changes.push("Açıklama güncellendi");
+        }
       }
 
       // Compare Images (simplified URL match)
-      const existingImageSrcs = (existingProduct.images || []).map((img: any) => img.src.trim());
-      const newImageSrcs = images.map((img: any) => img.src.trim());
-      const imagesChanged = JSON.stringify(existingImageSrcs) !== JSON.stringify(newImageSrcs);
+      if (!syncOnlyStockPrice) {
+        const existingImageSrcs = (existingProduct.images || []).map((img: any) => img.src.trim());
+        const newImageSrcs = images.map((img: any) => img.src.trim());
+        const imagesChanged = JSON.stringify(existingImageSrcs) !== JSON.stringify(newImageSrcs);
 
-      if (imagesChanged && images.length > 0) {
-        updateData.images = images;
-        changes.push(`Görseller: ${existingImageSrcs.length} adet -> ${newImageSrcs.length} adet`);
+        if (imagesChanged && images.length > 0) {
+          updateData.images = images;
+          changes.push(`Görseller: ${existingImageSrcs.length} adet -> ${newImageSrcs.length} adet`);
+        }
       }
 
       // Compare and merge attributes
-      const existingAttrs = existingProduct.attributes || [];
-      const updatedAttributes = [...existingAttrs];
-      let attributesChanged = false;
+      if (!syncOnlyStockPrice) {
+        const existingAttrs = existingProduct.attributes || [];
+        const updatedAttributes = [...existingAttrs];
+        let attributesChanged = false;
 
-      for (const attrMap of attrsMap) {
-        let xmlVal = "";
-        if (attrMap.xmlField === "__extract_gender__") {
-          const nameVal = String(product[mapping.nameField] || "").toLowerCase();
-          if (nameVal.includes("unisex")) {
-            xmlVal = "Unisex";
-          } else if (nameVal.includes("erkek")) {
-            xmlVal = "Erkek";
-          } else if (nameVal.includes("kadın") || nameVal.includes("kadin") || nameVal.includes("bayan")) {
-            xmlVal = "Kadın";
+        for (const attrMap of attrsMap) {
+          let xmlVal = "";
+          if (attrMap.xmlField === "__extract_gender__") {
+            const nameVal = String(product[mapping.nameField] || "").toLowerCase();
+            if (nameVal.includes("unisex")) {
+              xmlVal = "Unisex";
+            } else if (nameVal.includes("erkek")) {
+              xmlVal = "Erkek";
+            } else if (nameVal.includes("kadın") || nameVal.includes("kadin") || nameVal.includes("bayan")) {
+              xmlVal = "Kadın";
+            }
+          } else {
+            xmlVal = String(product[attrMap.xmlField] || "").trim();
           }
-        } else {
-          xmlVal = String(product[attrMap.xmlField] || "").trim();
-        }
 
-        if (!xmlVal || !attrMap.wooName) continue;
+          if (!xmlVal || !attrMap.wooName) continue;
 
-        const globalId = findGlobalAttributeId(attrMap.wooName);
+          const globalId = findGlobalAttributeId(attrMap.wooName);
 
-        const existingAttrIdx = updatedAttributes.findIndex(
-          (a: any) => (globalId > 0 && a.id === globalId) || a.name.toLowerCase() === attrMap.wooName.toLowerCase()
-        );
+          const existingAttrIdx = updatedAttributes.findIndex(
+            (a: any) => (globalId > 0 && a.id === globalId) || a.name.toLowerCase() === attrMap.wooName.toLowerCase()
+          );
 
-        if (existingAttrIdx >= 0) {
-          const existingAttr = updatedAttributes[existingAttrIdx];
-          const existingVal = existingAttr.options?.[0] || "";
-          const existingId = existingAttr.id ?? 0;
-          if (existingVal !== xmlVal || existingAttr.visible !== attrMap.visible || existingId !== globalId) {
-            updatedAttributes[existingAttrIdx] = {
-              ...existingAttr,
+          if (existingAttrIdx >= 0) {
+            const existingAttr = updatedAttributes[existingAttrIdx];
+            const existingVal = existingAttr.options?.[0] || "";
+            const existingId = existingAttr.id ?? 0;
+            if (existingVal !== xmlVal || existingAttr.visible !== attrMap.visible || existingId !== globalId) {
+              updatedAttributes[existingAttrIdx] = {
+                ...existingAttr,
+                id: globalId,
+                name: attrMap.wooName,
+                visible: attrMap.visible,
+                options: [xmlVal]
+              };
+              attributesChanged = true;
+              changes.push(`Özellik (${attrMap.wooName}): "${existingVal}" -> "${xmlVal}" (ID: ${existingId} -> ${globalId})`);
+            }
+          } else {
+            // Attribute doesn't exist on product, add it
+            updatedAttributes.push({
               id: globalId,
               name: attrMap.wooName,
               visible: attrMap.visible,
+              variation: false,
               options: [xmlVal]
-            };
+            });
             attributesChanged = true;
-            changes.push(`Özellik (${attrMap.wooName}): "${existingVal}" -> "${xmlVal}" (ID: ${existingId} -> ${globalId})`);
+            changes.push(`Özellik eklendi (${attrMap.wooName}): "${xmlVal}"`);
           }
-        } else {
-          // Attribute doesn't exist on product, add it
-          updatedAttributes.push({
-            id: globalId,
-            name: attrMap.wooName,
-            visible: attrMap.visible,
-            variation: false,
-            options: [xmlVal]
-          });
-          attributesChanged = true;
-          changes.push(`Özellik eklendi (${attrMap.wooName}): "${xmlVal}"`);
         }
-      }
 
-      if (attributesChanged) {
-        updateData.attributes = updatedAttributes;
+        if (attributesChanged) {
+          updateData.attributes = updatedAttributes;
+        }
       }
 
       // 2. Perform Update if there are changes

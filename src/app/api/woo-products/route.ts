@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
     const authHeader = `Basic ${Buffer.from(`${wooConfig.consumerKey}:${wooConfig.consumerSecret}`).toString("base64")}`;
 
     // Query status=any to list all products, and append dynamic timestamp to bypass WordPress REST cache
-    const wooUrl = `${baseUrl}/wp-json/wc/v3/products?page=${page}&per_page=100&status=any&fields=id,sku,name,stock_quantity&_=${Date.now()}`;
+    const wooUrl = `${baseUrl}/wp-json/wc/v3/products?page=${page}&per_page=100&status=any&fields=id,sku,name,regular_price,manage_stock,stock_quantity,description,images,attributes&_=${Date.now()}`;
 
     const response = await fetch(wooUrl, {
       method: "GET",

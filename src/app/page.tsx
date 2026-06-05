@@ -107,6 +107,15 @@ export default function Home() {
   const [searchError, setSearchError] = useState("");
   const [singleSyncingSku, setSingleSyncingSku] = useState<string | null>(null);
 
+  // Performance & Advanced Sync States
+  const [fastSync, setFastSync] = useState(true);
+  const [syncOnlyStockPrice, setSyncOnlyStockPrice] = useState(false);
+  const [concurrency, setConcurrency] = useState(5);
+  const [isPreloadingWoo, setIsPreloadingWoo] = useState(false);
+  const [preloadStatus, setPreloadStatus] = useState("");
+
+  const wooProductsMapRef = useRef<Map<string, any>>(new Map());
+
   // Load configuration and mapping from localStorage on mount
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -117,6 +126,9 @@ export default function Home() {
       const storedMultiplier = localStorage.getItem("price_multiplier") || "1.0";
       const storedAddition = localStorage.getItem("price_addition") || "0";
       const storedCleanupPolicy = localStorage.getItem("cleanup_policy") || "none";
+      const storedFastSync = localStorage.getItem("sync_fast_sync") !== "false";
+      const storedSyncOnlyStockPrice = localStorage.getItem("sync_only_stock_price") === "true";
+      const storedConcurrency = parseInt(localStorage.getItem("sync_concurrency") || "5", 10);
       
       setWooUrl(storedUrl);
       setConsumerKey(storedKey);
@@ -125,6 +137,9 @@ export default function Home() {
       setPriceMultiplier(storedMultiplier);
       setPriceAddition(storedAddition);
       setCleanupPolicy(storedCleanupPolicy);
+      setFastSync(storedFastSync);
+      setSyncOnlyStockPrice(storedSyncOnlyStockPrice);
+      setConcurrency(storedConcurrency);
 
       const storedExcludedBrands = localStorage.getItem("excluded_brands");
       if (storedExcludedBrands) {
@@ -166,6 +181,9 @@ export default function Home() {
     localStorage.setItem("cleanup_policy", cleanupPolicy);
     localStorage.setItem("attribute_mappings", JSON.stringify(attributeMappings));
     localStorage.setItem("excluded_brands", JSON.stringify(excludedBrands));
+    localStorage.setItem("sync_fast_sync", fastSync.toString());
+    localStorage.setItem("sync_only_stock_price", syncOnlyStockPrice.toString());
+    localStorage.setItem("sync_concurrency", concurrency.toString());
     addLog("WooCommerce ve XML bağlantı ayarları yerel tarayıcı hafızasına kaydedildi.", "success");
   };
 
@@ -175,6 +193,13 @@ export default function Home() {
       localStorage.setItem("mapping_config", JSON.stringify(mapping));
     }
   }, [mapping]);
+
+  // Auto-save advanced sync settings when they change
+  useEffect(() => {
+    localStorage.setItem("sync_fast_sync", fastSync.toString());
+    localStorage.setItem("sync_only_stock_price", syncOnlyStockPrice.toString());
+    localStorage.setItem("sync_concurrency", concurrency.toString());
+  }, [fastSync, syncOnlyStockPrice, concurrency]);
 
   // Auto-scroll logs console to bottom
   useEffect(() => {
@@ -252,95 +277,327 @@ export default function Home() {
     }
   };
 
-  // Sync Loop Engine controlled via React useEffect
-  useEffect(() => {
-    if (!isSyncing || isPaused || currentIndex >= products.length) {
-      if (isSyncing && currentIndex >= products.length) {
-        setIsSyncing(false);
-        addLog(`Senkronizasyon tamamlandı! Toplam İşlenen: ${stats.processed}, Eklenen: ${stats.created}, Güncellenen: ${stats.updated}, Atlanan: ${stats.skipped}, Hata: ${stats.error}`, "success");
-      }
-      return;
-    }
+  // Refs to keep track of running sync parameters and state to avoid stale closures in workers
+  const isSyncingRef = useRef(isSyncing);
+  const isPausedRef = useRef(isPaused);
+  const currentIndexRef = useRef(currentIndex);
+  const productsRef = useRef(products);
+  const mappingRef = useRef(mapping);
+  const wooUrlRef = useRef(wooUrl);
+  const consumerKeyRef = useRef(consumerKey);
+  const consumerSecretRef = useRef(consumerSecret);
+  const priceMultiplierRef = useRef(priceMultiplier);
+  const priceAdditionRef = useRef(priceAddition);
+  const attributeMappingsRef = useRef(attributeMappings);
+  const excludedBrandsRef = useRef(excludedBrands);
+  const fastSyncRef = useRef(fastSync);
+  const syncOnlyStockPriceRef = useRef(syncOnlyStockPrice);
+  const concurrencyRef = useRef(concurrency);
 
-    let isRequestActive = true;
+  // Sync refs to state
+  useEffect(() => { isSyncingRef.current = isSyncing; }, [isSyncing]);
+  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
+  useEffect(() => { productsRef.current = products; }, [products]);
+  useEffect(() => { mappingRef.current = mapping; }, [mapping]);
+  useEffect(() => { wooUrlRef.current = wooUrl; }, [wooUrl]);
+  useEffect(() => { consumerKeyRef.current = consumerKey; }, [consumerKey]);
+  useEffect(() => { consumerSecretRef.current = consumerSecret; }, [consumerSecret]);
+  useEffect(() => { priceMultiplierRef.current = priceMultiplier; }, [priceMultiplier]);
+  useEffect(() => { priceAdditionRef.current = priceAddition; }, [priceAddition]);
+  useEffect(() => { attributeMappingsRef.current = attributeMappings; }, [attributeMappings]);
+  useEffect(() => { excludedBrandsRef.current = excludedBrands; }, [excludedBrands]);
+  useEffect(() => { fastSyncRef.current = fastSync; }, [fastSync]);
+  useEffect(() => { syncOnlyStockPriceRef.current = syncOnlyStockPrice; }, [syncOnlyStockPrice]);
+  useEffect(() => { concurrencyRef.current = concurrency; }, [concurrency]);
 
-    const syncProductStep = async () => {
-      const product = products[currentIndex];
-      const sku = String(product[mapping.skuField] || `Bilinmeyen SKU (#${currentIndex})`).trim();
+  // Preload WooCommerce products for local caching
+  const preloadWooCommerceProducts = async (): Promise<Map<string, any> | null> => {
+    setIsPreloadingWoo(true);
+    setPreloadStatus("WooCommerce ürün listesi alınıyor...");
+    addLog("WooCommerce ürünleri önbelleğe yüklenmeye başlanıyor...", "info");
 
-      // Find the Brand mapping and value
-      const brandMapping = attributeMappings.find(am => am.wooName.toLowerCase() === "brand");
-      const brandField = brandMapping?.xmlField || "Brand";
-      const productBrand = String(product[brandField] || "").trim();
+    const localMap = new Map<string, any>();
+    let currentPage = 1;
+    let totalPages = 1;
 
-      // Skip sync if the product brand is excluded
-      if (productBrand && excludedBrands.includes(productBrand)) {
-        addLog(`[Atlandı] SKU "${sku}" - "${productBrand}" markası filtrelendiği için aktarılmadı.`, "muted");
-        setStats(prev => ({ ...prev, processed: prev.processed + 1, skipped: prev.skipped + 1 }));
-        if (isRequestActive) {
-          setCurrentIndex(prev => prev + 1);
-        }
-        return;
-      }
+    try {
+      while (currentPage <= totalPages) {
+        setPreloadStatus(`WooCommerce ürünleri çekiliyor: Sayfa ${currentPage} / ${totalPages}...`);
+        addLog(`WooCommerce ürünleri ön-yükleniyor: Sayfa ${currentPage} / ${totalPages || "?"}`, "info");
 
-      addLog(`[${currentIndex + 1}/${products.length}] SKU "${sku}" WooCommerce ile senkronize ediliyor...`, "info");
-
-      try {
-        const response = await fetch("/api/sync-product", {
+        const response = await fetch("/api/woo-products", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             wooConfig: {
-              url: wooUrl,
-              consumerKey,
-              consumerSecret
+              url: wooUrlRef.current,
+              consumerKey: consumerKeyRef.current,
+              consumerSecret: consumerSecretRef.current,
             },
-            product,
-            mapping,
-            priceMultiplier,
-            priceAddition,
-            attributeMappings
-          })
+            page: currentPage,
+          }),
         });
 
-        if (!isRequestActive) return;
-
-        const result = await response.json();
-
-        if (result.success) {
-          if (result.status === "created") {
-            setStats(prev => ({ ...prev, processed: prev.processed + 1, created: prev.created + 1 }));
-            addLog(`✔ SKU "${sku}" WooCommerce'de yeni ürün olarak oluşturuldu (ID: ${result.id}).`, "success");
-          } else if (result.status === "updated") {
-            setStats(prev => ({ ...prev, processed: prev.processed + 1, updated: prev.updated + 1 }));
-            addLog(`⚡ SKU "${sku}" güncellendi: ${result.changes.join(", ")}`, "warning");
-          } else if (result.status === "skipped") {
-            setStats(prev => ({ ...prev, processed: prev.processed + 1, skipped: prev.skipped + 1 }));
-            addLog(`ℹ SKU "${sku}" güncel olduğu için atlandı.`, "muted");
-          }
-        } else {
-          setStats(prev => ({ ...prev, processed: prev.processed + 1, error: prev.error + 1 }));
-          addLog(`❌ SKU "${sku}" senkronizasyon hatası: ${result.error}`, "error");
+        const data = await response.json();
+        if (!data.success) {
+          throw new Error(data.error || "WooCommerce'den ürünler çekilemedi.");
         }
-      } catch (err: any) {
-        if (!isRequestActive) return;
-        setStats(prev => ({ ...prev, processed: prev.processed + 1, error: prev.error + 1 }));
-        addLog(`❌ SKU "${sku}" sunucuyla haberleşme hatası: ${err.message || err}`, "error");
+
+        const batch = data.products || [];
+        if (batch.length === 0) {
+          break; // no more products
+        }
+
+        for (const item of batch) {
+          const sku = String(item.sku || "").trim().toLowerCase();
+          if (sku) {
+            localMap.set(sku, item);
+          }
+        }
+
+        totalPages = data.totalPages || 1;
+        currentPage++;
       }
 
-      if (isRequestActive) {
-        setCurrentIndex(prev => prev + 1);
+      addLog(`WooCommerce önbellekleme tamamlandı. Toplam ${localMap.size} benzersiz ürün yüklendi.`, "success");
+      return localMap;
+    } catch (err: any) {
+      addLog(`WooCommerce önbellekleme hatası: ${err.message || err}`, "error");
+      return null;
+    } finally {
+      setIsPreloadingWoo(false);
+      setPreloadStatus("");
+    }
+  };
+
+  // Check product changes locally to skip network calls
+  const checkProductChangesLocally = (xmlProd: any, existingProduct: any, syncOnlyStockPrice: boolean) => {
+    const changes: string[] = [];
+
+    // Calculate XML target price
+    const priceStr = String(xmlProd[mappingRef.current.priceField] || "0").trim().replace(",", ".");
+    const rawPrice = parseFloat(priceStr) || 0;
+    const multiplier = parseFloat(priceMultiplierRef.current) || 1;
+    const addition = parseFloat(priceAdditionRef.current) || 0;
+    const targetPrice = Math.round((rawPrice * multiplier + addition) * 100) / 100;
+
+    // Calculate XML target stock
+    const targetStock = parseInt(xmlProd[mappingRef.current.stockField] || "0", 10) || 0;
+
+    // Compare price
+    const existingPrice = parseFloat(existingProduct.regular_price || "0");
+    if (existingPrice !== targetPrice) {
+      changes.push(`Fiyat: ${existingPrice} -> ${targetPrice}`);
+    }
+
+    // Compare stock
+    const existingStock = existingProduct.stock_quantity ?? 0;
+    const isStockManaged = existingProduct.manage_stock === true;
+    if (!isStockManaged || existingStock !== targetStock) {
+      changes.push(`Stok: ${existingStock} (Yönetim: ${isStockManaged ? 'Açık' : 'Kapalı'}) -> ${targetStock}`);
+    }
+
+    if (!syncOnlyStockPrice) {
+      // Compare name
+      const targetName = String(xmlProd[mappingRef.current.nameField] || "").trim();
+      if (targetName !== "" && existingProduct.name !== targetName) {
+        changes.push(`İsim: "${existingProduct.name}" -> "${targetName}"`);
+      }
+
+      // Compare description
+      let targetDesc = String(xmlProd[mappingRef.current.descriptionField] || "").trim();
+      targetDesc = targetDesc.replace(/Filiz Aksesuar/gi, "Setifera");
+      const existingDesc = (existingProduct.description || "").trim();
+      if (targetDesc !== "" && existingDesc !== targetDesc) {
+        changes.push("Açıklama güncellendi");
+      }
+
+      // Compare images
+      const imageFields = mappingRef.current.imageFields || [];
+      const newImageSrcs = imageFields
+        .map((field: string) => xmlProd[field])
+        .filter((val: any) => typeof val === "string" && val.trim() !== "")
+        .map((url: string) => url.trim());
+      const existingImageSrcs = (existingProduct.images || []).map((img: any) => img.src.trim());
+      if (newImageSrcs.length > 0 && JSON.stringify(existingImageSrcs) !== JSON.stringify(newImageSrcs)) {
+        changes.push("Görseller güncellendi");
+      }
+
+      // Compare attributes
+      const existingAttrs = existingProduct.attributes || [];
+      for (const attrMap of attributeMappingsRef.current) {
+        if (!attrMap.wooName) continue;
+        let xmlVal = "";
+        if (attrMap.xmlField === "__extract_gender__") {
+          const nameVal = String(xmlProd[mappingRef.current.nameField] || "").toLowerCase();
+          if (nameVal.includes("unisex")) xmlVal = "Unisex";
+          else if (nameVal.includes("erkek")) xmlVal = "Erkek";
+          else if (nameVal.includes("kadın") || nameVal.includes("kadin") || nameVal.includes("bayan")) xmlVal = "Kadın";
+        } else {
+          xmlVal = String(xmlProd[attrMap.xmlField] || "").trim();
+        }
+        if (!xmlVal) continue;
+
+        const existingAttr = existingAttrs.find(
+          (a: any) => a.name.toLowerCase() === attrMap.wooName.toLowerCase()
+        );
+        if (!existingAttr) {
+          changes.push(`Eksik Nitelik: ${attrMap.wooName}`);
+        } else {
+          const existingVal = existingAttr.options?.[0] || "";
+          if (existingVal !== xmlVal) {
+            changes.push(`Özellik (${attrMap.wooName}): "${existingVal}" -> "${xmlVal}"`);
+          }
+        }
+      }
+    }
+
+    return {
+      hasChanges: changes.length > 0,
+      changes
+    };
+  };
+
+  // Run the concurrent synchronization queue
+  const runSyncQueue = async (startIdx: number, xmlProducts: any[], localCache: Map<string, any> | null) => {
+    let nextIndex = startIdx;
+    
+    const worker = async () => {
+      while (true) {
+        if (!isSyncingRef.current || isPausedRef.current) {
+          break;
+        }
+
+        const idx = nextIndex++;
+        if (idx >= xmlProducts.length) {
+          break;
+        }
+
+        // Keep track of resume index
+        setCurrentIndex(nextIndex);
+
+        const product = xmlProducts[idx];
+        const sku = String(product[mappingRef.current.skuField] || `Bilinmeyen SKU (#${idx})`).trim();
+
+        // Brand filtering
+        const brandMapping = attributeMappingsRef.current.find(am => am.wooName.toLowerCase() === "brand");
+        const brandField = brandMapping?.xmlField || "Brand";
+        const productBrand = String(product[brandField] || "").trim();
+
+        if (productBrand && excludedBrandsRef.current.includes(productBrand)) {
+          addLog(`[Atlandı] SKU "${sku}" - "${productBrand}" markası filtrelendiği için aktarılmadı.`, "muted");
+          setStats(prev => ({ ...prev, processed: prev.processed + 1, skipped: prev.skipped + 1 }));
+          continue;
+        }
+
+        // Cache lookup
+        const existingProduct = localCache ? localCache.get(sku.toLowerCase()) : null;
+
+        if (localCache && existingProduct) {
+          const comparison = checkProductChangesLocally(product, existingProduct, syncOnlyStockPriceRef.current);
+          if (!comparison.hasChanges) {
+            setStats(prev => ({ ...prev, processed: prev.processed + 1, skipped: prev.skipped + 1 }));
+            addLog(`ℹ SKU "${sku}" güncel olduğu için atlandı (Yerel önbellek doğrulaması).`, "muted");
+            continue;
+          } else {
+            addLog(`⚡ SKU "${sku}" değişiklik tespit edildi: ${comparison.changes.join(", ")}`, "info");
+          }
+        } else if (localCache) {
+          addLog(`[Yeni Ürün] SKU "${sku}" WooCommerce'de bulunamadı. Oluşturulacak...`, "info");
+        } else {
+          addLog(`[${idx + 1}/${xmlProducts.length}] SKU "${sku}" WooCommerce ile senkronize ediliyor...`, "info");
+        }
+
+        // API Request to sync-product
+        try {
+          const response = await fetch("/api/sync-product", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              wooConfig: {
+                url: wooUrlRef.current,
+                consumerKey: consumerKeyRef.current,
+                consumerSecret: consumerSecretRef.current
+              },
+              product,
+              mapping: mappingRef.current,
+              priceMultiplier: priceMultiplierRef.current,
+              priceAddition: priceAdditionRef.current,
+              attributeMappings: attributeMappingsRef.current,
+              existingProduct: existingProduct,
+              syncOnlyStockPrice: syncOnlyStockPriceRef.current
+            })
+          });
+
+          if (!isSyncingRef.current) break;
+
+          const result = await response.json();
+
+          if (result.success) {
+            if (result.status === "created") {
+              setStats(prev => ({ ...prev, processed: prev.processed + 1, created: prev.created + 1 }));
+              addLog(`✔ SKU "${sku}" WooCommerce'de yeni ürün olarak oluşturuldu (ID: ${result.id}).`, "success");
+              if (localCache) {
+                localCache.set(sku.toLowerCase(), {
+                  id: result.id,
+                  sku: sku,
+                  name: String(product[mappingRef.current.nameField] || "").trim(),
+                  regular_price: (Math.round((parseFloat(String(product[mappingRef.current.priceField] || "0").trim().replace(",", ".")) * (parseFloat(priceMultiplierRef.current) || 1) + (parseFloat(priceAdditionRef.current) || 0)) * 100) / 100).toString(),
+                  stock_quantity: parseInt(product[mappingRef.current.stockField] || "0", 10) || 0,
+                  manage_stock: true,
+                  description: String(product[mappingRef.current.descriptionField] || "").trim().replace(/Filiz Aksesuar/gi, "Setifera"),
+                  images: (mappingRef.current.imageFields || []).map((field: string) => product[field]).filter((val: any) => typeof val === "string" && val.trim() !== "").map((url: string) => ({ src: url.trim() })),
+                  attributes: []
+                });
+              }
+            } else if (result.status === "updated") {
+              setStats(prev => ({ ...prev, processed: prev.processed + 1, updated: prev.updated + 1 }));
+              addLog(`⚡ SKU "${sku}" güncellendi: ${result.changes.join(", ")}`, "warning");
+              if (localCache && existingProduct) {
+                const updatedProduct = {
+                  ...existingProduct,
+                  name: String(product[mappingRef.current.nameField] || "").trim(),
+                  regular_price: (Math.round((parseFloat(String(product[mappingRef.current.priceField] || "0").trim().replace(",", ".")) * (parseFloat(priceMultiplierRef.current) || 1) + (parseFloat(priceAdditionRef.current) || 0)) * 100) / 100).toString(),
+                  stock_quantity: parseInt(product[mappingRef.current.stockField] || "0", 10) || 0,
+                  manage_stock: true,
+                  description: String(product[mappingRef.current.descriptionField] || "").trim().replace(/Filiz Aksesuar/gi, "Setifera")
+                };
+                localCache.set(sku.toLowerCase(), updatedProduct);
+              }
+            } else if (result.status === "skipped") {
+              setStats(prev => ({ ...prev, processed: prev.processed + 1, skipped: prev.skipped + 1 }));
+              addLog(`ℹ SKU "${sku}" güncel olduğu için atlandı.`, "muted");
+            }
+          } else {
+            setStats(prev => ({ ...prev, processed: prev.processed + 1, error: prev.error + 1 }));
+            addLog(`❌ SKU "${sku}" senkronizasyon hatası: ${result.error}`, "error");
+          }
+        } catch (err: any) {
+          if (!isSyncingRef.current) break;
+          setStats(prev => ({ ...prev, processed: prev.processed + 1, error: prev.error + 1 }));
+          addLog(`❌ SKU "${sku}" sunucuyla haberleşme hatası: ${err.message || err}`, "error");
+        }
       }
     };
 
-    // Brief delay to allow UI to breathe between calls (50ms)
-    const timeoutId = setTimeout(syncProductStep, 50);
+    const workerPromises: Promise<void>[] = [];
+    const numWorkers = Math.min(concurrencyRef.current, xmlProducts.length - startIdx);
+    
+    addLog(`Paralel senkronizasyon başlatılıyor. Eş zamanlı istek sayısı: ${numWorkers}`, "info");
 
-    return () => {
-      isRequestActive = false;
-      clearTimeout(timeoutId);
-    };
-  }, [isSyncing, isPaused, currentIndex, products, mapping, wooUrl, consumerKey, consumerSecret, priceMultiplier, priceAddition, attributeMappings, excludedBrands]);
+    for (let i = 0; i < numWorkers; i++) {
+      workerPromises.push(worker());
+    }
+
+    await Promise.all(workerPromises);
+
+    if (isSyncingRef.current && !isPausedRef.current && nextIndex >= xmlProducts.length) {
+      setIsSyncing(false);
+      isSyncingRef.current = false;
+      addLog("Senkronizasyon işlemi tamamlandı!", "success");
+    }
+  };
 
   // Cleanup Loop Engine controlled via React useEffect
   useEffect(() => {
@@ -469,7 +726,7 @@ export default function Home() {
   }, [isCleaning, isPaused, cleanupPage, cleanupTotalPages, products, mapping, wooUrl, consumerKey, consumerSecret, cleanupPolicy, excludedBrands]);
 
   // Sync Controls
-  const startSync = () => {
+  const startSync = async () => {
     if (!wooUrl || !consumerKey || !consumerSecret) {
       addLog("Lütfen WooCommerce API bağlantı ayarlarını girin ve kaydedin.", "error");
       return;
@@ -485,11 +742,35 @@ export default function Home() {
 
     setIsSyncing(true);
     setIsPaused(false);
+    
+    // Update refs immediately to avoid state delay checks in workers
+    isSyncingRef.current = true;
+    isPausedRef.current = false;
+
     addLog("Senkronizasyon işlemi başlatıldı...", "success");
+
+    let localCache = wooProductsMapRef.current;
+    
+    if (fastSync && localCache.size === 0) {
+      const preloadedMap = await preloadWooCommerceProducts();
+      if (!preloadedMap) {
+        setIsSyncing(false);
+        isSyncingRef.current = false;
+        return;
+      }
+      wooProductsMapRef.current = preloadedMap;
+      localCache = preloadedMap;
+    } else if (!fastSync) {
+      localCache = new Map();
+      wooProductsMapRef.current = new Map();
+    }
+
+    runSyncQueue(currentIndex, products, fastSync ? localCache : null);
   };
 
   const pauseSync = () => {
     setIsPaused(true);
+    isPausedRef.current = true;
     addLog("Senkronizasyon işlemi duraklatıldı.", "warning");
   };
 
@@ -497,6 +778,9 @@ export default function Home() {
     setIsSyncing(false);
     setIsPaused(false);
     setIsCleaning(false);
+    isSyncingRef.current = false;
+    isPausedRef.current = false;
+    wooProductsMapRef.current = new Map(); // clear cache
     setCurrentIndex(0);
     setStats({
       processed: 0,
@@ -751,7 +1035,7 @@ export default function Home() {
   };
 
   // Percent calculator
-  const progressPercent = products.length > 0 ? Math.round((currentIndex / products.length) * 100) : 0;
+  const progressPercent = products.length > 0 ? Math.round((stats.processed / products.length) * 100) : 0;
 
   return (
     <div className="app-container">
@@ -1206,6 +1490,55 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Performans ve Senkronizasyon Seçenekleri */}
+              <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
+                <label className="form-label" style={{ fontWeight: "600", color: "var(--accent-indigo)", marginBottom: "0.5rem" }}>
+                  Senkronizasyon Seçenekleri & Hız Ayarları
+                </label>
+                
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", marginBottom: "0.75rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input 
+                      type="checkbox" 
+                      id="sync-fast"
+                      checked={fastSync}
+                      onChange={(e) => setFastSync(e.target.checked)}
+                      style={{ cursor: "pointer", width: "14px", height: "14px" }}
+                    />
+                    <label htmlFor="sync-fast" style={{ fontSize: "0.75rem", color: "var(--text-primary)", cursor: "pointer", userSelect: "none" }}>
+                      <strong>Hızlı Senkronizasyon</strong> (WooCommerce ürünlerini önbelleğe alır ve değişmeyenleri atlar)
+                    </label>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input 
+                      type="checkbox" 
+                      id="sync-only-stock-price"
+                      checked={syncOnlyStockPrice}
+                      onChange={(e) => setSyncOnlyStockPrice(e.target.checked)}
+                      style={{ cursor: "pointer", width: "14px", height: "14px" }}
+                    />
+                    <label htmlFor="sync-only-stock-price" style={{ fontSize: "0.75rem", color: "var(--text-primary)", cursor: "pointer", userSelect: "none" }}>
+                      <strong>Sadece Stok ve Fiyat Güncelle</strong> (Açıklama, isim ve görselleri güncellemez; elle yapılan değişiklikleri korur)
+                    </label>
+                  </div>
+                </div>
+
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label" style={{ fontSize: "0.75rem" }}>Eş Zamanlı İstek Sayısı (Hız)</label>
+                  <select 
+                    className="form-select"
+                    value={concurrency}
+                    onChange={(e) => setConcurrency(parseInt(e.target.value, 10))}
+                  >
+                    <option value="1">1 (En Güvenli / Yavaş)</option>
+                    <option value="3">3 (Normal)</option>
+                    <option value="5">5 (Hızlı)</option>
+                    <option value="10">10 (Çok Hızlı / Sunucuya Yük Bindirir)</option>
+                  </select>
+                </div>
+              </div>
+
               {/* XML Dışı Ürün Ayarları (Temizlik) */}
               <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
                 <label className="form-label" style={{ fontWeight: "600", color: "var(--accent-purple)", marginBottom: "0.5rem" }}>
@@ -1273,11 +1606,21 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* Preloading Status */}
+              {isPreloadingWoo && (
+                <div style={{ marginBottom: "1rem", padding: "0.85rem", background: "rgba(59, 130, 246, 0.08)", border: "1px solid rgba(59, 130, 246, 0.25)", borderRadius: "var(--radius-md)", fontSize: "0.8rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <RefreshCw size={14} style={{ animation: "spin 1s linear infinite", color: "var(--accent-indigo)" }} />
+                    <span style={{ fontWeight: "600", color: "var(--text-primary)" }}>{preloadStatus}</span>
+                  </div>
+                </div>
+              )}
+
               {/* Progress Bar */}
               <div className="progress-wrapper">
                 <div className="progress-header">
                   <span>Senkronizasyon Durumu</span>
-                  <span>%{progressPercent} ({currentIndex} / {products.length})</span>
+                  <span>%{progressPercent} ({stats.processed} / {products.length})</span>
                 </div>
                 <div className="progress-bar-bg">
                   <div className="progress-bar-fill" style={{ width: `${progressPercent}%` }}></div>
