@@ -112,6 +112,10 @@ export default function OrdersPage() {
   // Copy status
   const [copied, setCopied] = useState(false);
 
+  // Debug stats state
+  const [statsDebug, setStatsDebug] = useState<any>(null);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
+
   // Keep track of order IDs to detect new orders
   const seenOrderIdsRef = useRef<Set<number>>(new Set());
 
@@ -275,11 +279,14 @@ export default function OrdersPage() {
         setPopularProducts(data.popularProducts || []);
         setViewedProducts(data.viewedProducts || []);
         setViewsTrackingActive(data.viewsTrackingActive || false);
+        setStatsDebug(data.viewDebug || null);
       } else {
         setStatsError(data.error || "İstatistikler yüklenemedi.");
+        setStatsDebug(data);
       }
     } catch (err: any) {
       setStatsError(`İstatistikler bağlantı hatası: ${err.message || err}`);
+      setStatsDebug({ exception: err.message || String(err) });
     } finally {
       setIsStatsLoading(false);
     }
@@ -589,6 +596,32 @@ export default function OrdersPage() {
           {!viewsTrackingActive && (
             <div style={{ marginBottom: "1rem", padding: "0.75rem", background: "var(--accent-warning-bg)", border: "1px solid var(--accent-warning)", borderRadius: "var(--radius-md)", fontSize: "0.75rem", color: "var(--text-primary)" }}>
               <p><strong>İzleme Kodu Aktif Değil:</strong> Ürün sayfa ziyaretleri henüz sayılmıyor. Saydırmayı başlatmak için aşağıdaki entegrasyon kodunu WordPress sitenize eklemelisiniz.</p>
+              
+              {statsDebug && (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <button 
+                    className="btn btn-secondary" 
+                    style={{ padding: "0.2rem 0.4rem", fontSize: "0.7rem", height: "auto" }}
+                    onClick={() => setShowDebugPanel(!showDebugPanel)}
+                  >
+                    {showDebugPanel ? "Bağlantı Detaylarını Gizle" : "Bağlantı Detaylarını Göster (Hata Ayıklama)"}
+                  </button>
+                  {showDebugPanel && (
+                    <pre style={{ 
+                      marginTop: "0.5rem", 
+                      padding: "0.5rem", 
+                      background: "rgba(0,0,0,0.4)", 
+                      borderRadius: "var(--radius-sm)", 
+                      fontSize: "0.7rem", 
+                      overflowX: "auto",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all"
+                    }}>
+                      {JSON.stringify(statsDebug, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

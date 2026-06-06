@@ -44,8 +44,11 @@ export async function POST(request: NextRequest) {
     // 2. Fetch Top 10 Most Viewed Products (Requires visit_count query parameters)
     let viewedProducts: any[] = [];
     let viewsTrackingActive = false;
+    let viewDebug: any = {};
     try {
       const viewUrl = `${baseUrl}/wp-json/wc/v3/products?orderby=visit_count&order=desc&per_page=10&_=${Date.now()}`;
+      viewDebug.url = viewUrl.replace(/:[^:/@]+@/, ":****@"); // hide password if basic auth URL format is used
+      
       const viewResponse = await fetch(viewUrl, {
         method: "GET",
         headers: {
@@ -55,25 +58,43 @@ export async function POST(request: NextRequest) {
         cache: "no-store",
         next: { revalidate: 0 }
       });
+      
+      viewDebug.status = viewResponse.status;
+      viewDebug.ok = viewResponse.ok;
+
       if (viewResponse.ok) {
-        viewedProducts = await viewResponse.json();
-        // Check if WooCommerce returned product objects containing the visit_count custom field
-        const sample = viewedProducts[0];
-        if (sample && typeof sample.visit_count !== "undefined") {
-          viewsTrackingActive = true;
-        } else {
-          viewedProducts = []; // reset if not supported
+        const rawJson = await viewResponse.json();
+        viewedProducts = Array.isArray(rawJson) ? rawJson : [];
+        viewDebug.count = viewedProducts.length;
+        
+        if (viewedProducts.length > 0) {
+          const sample = viewedProducts[0];
+          viewDebug.sampleId = sample.id;
+          viewDebug.sampleName = sample.name;
+          viewDebug.sampleKeys = Object.keys(sample);
+          viewDebug.sampleVisitCount = sample.visit_count;
+          viewDebug.sampleVisitCountType = typeof sample.visit_count;
+          
+          if (typeof sample.visit_count !== "undefined") {
+            viewsTrackingActive = true;
+          }
         }
+      } else {
+        const errText = await viewResponse.text();
+        viewDebug.errorText = errText;
+        console.error("Viewed Products Fetch Error Text:", errText);
       }
-    } catch (err) {
-      console.error("Viewed Products Fetch Error:", err);
+    } catch (err: any) {
+      viewDebug.exception = err.message || String(err);
+      console.error("Viewed Products Fetch Exception:", err);
     }
 
     return NextResponse.json({
       success: true,
       popularProducts: Array.isArray(popularProducts) ? popularProducts : [],
       viewedProducts: Array.isArray(viewedProducts) ? viewedProducts : [],
-      viewsTrackingActive
+      viewsTrackingActive,
+      viewDebug
     });
   } catch (error: any) {
     console.error("Woo Stats Fetch Error:", error);
