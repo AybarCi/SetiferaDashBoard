@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   description: "XML ürün entegrasyonu ve WooCommerce senkronizasyon kontrol paneli.",
 };
 
+import { AppProvider } from "../context/AppContext";
+import SidebarLayout from "../components/SidebarLayout";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -24,7 +27,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
-      <body>{children}</body>
+      <body>
+        <AppProvider>
+          <SidebarLayout>
+            {children}
+          </SidebarLayout>
+        </AppProvider>
+      </body>
     </html>
   );
 }
