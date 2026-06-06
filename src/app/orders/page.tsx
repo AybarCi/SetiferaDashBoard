@@ -43,13 +43,15 @@ interface OrderTotalReport {
   total: number;
 }
 
-const phpSnippet = `// 1. Ürün tekil sayfaları yüklendiğinde ziyaret sayacını arttır
-add_action('woocommerce_before_single_product', 'setifera_save_product_views');
-function setifera_save_product_views() {
-    if (is_product()) {
+const phpSnippet = `// 1. Ürün tekil sayfaları yüklendiğinde ziyaret sayacını arttır (Gelişmiş ve Sayfa Yapıcılardan Bağımsız Yöntem)
+add_action('template_redirect', 'setifera_save_product_views_robust');
+function setifera_save_product_views_robust() {
+    if (is_product() && is_single()) {
         $product_id = get_the_ID();
-        $count = (int) get_post_meta($product_id, 'product_visit_count', true);
-        update_post_meta($product_id, 'product_visit_count', $count + 1);
+        if ($product_id) {
+            $count = (int) get_post_meta($product_id, 'product_visit_count', true);
+            update_post_meta($product_id, 'product_visit_count', $count + 1);
+        }
     }
 }
 
@@ -62,7 +64,16 @@ function setifera_add_views_to_rest($response, $object, $request) {
     return $response;
 }
 
-// 3. REST API'de visit_count parametresine göre sıralama desteği ekle
+// 3. REST API'nin 'visit_count' parametresini geçerli bir 'orderby' değeri olarak kabul etmesini sağla (ÇOK ÖNEMLİ)
+add_filter('woocommerce_rest_product_collection_params', 'setifera_register_visit_count_orderby', 10, 1);
+function setifera_register_visit_count_orderby($params) {
+    if (isset($params['orderby']['enum'])) {
+        $params['orderby']['enum'][] = 'visit_count';
+    }
+    return $params;
+}
+
+// 4. REST API'de visit_count parametresine göre sıralama desteği ekle
 add_filter('woocommerce_rest_product_object_query', 'setifera_add_views_orderby_to_rest', 10, 2);
 function setifera_add_views_orderby_to_rest($args, $request) {
     if (isset($request['orderby']) && $request['orderby'] === 'visit_count') {
