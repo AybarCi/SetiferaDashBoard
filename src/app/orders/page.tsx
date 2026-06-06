@@ -65,7 +65,7 @@ function setifera_add_views_to_rest($response, $object, $request) {
 }
 
 // 3. REST API'nin 'visit_count' parametresini geçerli bir 'orderby' değeri olarak kabul etmesini sağla (ÇOK ÖNEMLİ)
-add_filter('woocommerce_rest_product_collection_params', 'setifera_register_visit_count_orderby', 10, 1);
+add_filter('rest_product_collection_params', 'setifera_register_visit_count_orderby', 10, 1);
 function setifera_register_visit_count_orderby($params) {
     if (isset($params['orderby']['enum'])) {
         $params['orderby']['enum'][] = 'visit_count';
